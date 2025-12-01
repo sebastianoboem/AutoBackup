@@ -462,7 +462,7 @@ class GumBackupApp:
         print("\n" + "-"*50 + "\n")
         
         # Gum confirm to proceed
-        res = self._run_gum(["confirm", "Controlla se le impostazioni sono corrette.\nProcedere con la scansione?"])
+        res = self._run_gum(["confirm", "Vuoi confermare le impostazioni e procedere con la scansione?"])
         if res.returncode != 0:
             print(Fore.RED + "Operazione annullata dall'utente.")
             sys.exit()
@@ -500,7 +500,7 @@ class GumBackupApp:
             print(Fore.RED + "\nNessun file trovato.")
             sys.exit()
 
-        res = self._run_gum(["confirm", "Procedere con il backup?"])
+        res = self._run_gum(["confirm", "Vuoi procedere con il backup dei file trovati?"])
         if res.returncode != 0:
             sys.exit()
         
