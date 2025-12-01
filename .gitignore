@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual Environment
+.venv/
+env/
+venv/
+
+# Distribution / Packaging
+build/
+dist/
+*.spec
+
+# Application Specific
+backup_errors.log
