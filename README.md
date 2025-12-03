@@ -13,36 +13,65 @@ Un'applicazione portatile per il backup dei dati sviluppata in Python, progettat
 - **Gestione Processo**: Pausa, Ripresa e Stop durante la copia.
  
 ## Requisiti
- 
-- Windows 10 o 11
+
+- Windows 10 o 11, oppure macOS 12+
 - Python 3.8+ (solo per eseguire da sorgente o compilare)
  
 ## Installazione e Utilizzo
  
 ### 1. Eseguire da Sorgente
- 
+
 1. Installare le dipendenze:
    ```bash
    pip install -r requirements.txt
    ```
-2. Avviare l'applicazione:
+2. Installare Gum (solo macOS):
    ```bash
-   python main.py
+   brew install gum
+   ```
+3. Avviare l'applicazione:
+   
+   Puoi usare lo script automatico che gestisce le dipendenze:
+   ```bash
+   ./run_mac.sh
+   ```
+   
+   Oppure manualmente:
+   ```bash
+   source .venv/bin/activate
+   python main_gum.py
    ```
  
-### 2. Creare l'Eseguibile (.exe)
- 
+### 2. Creare l'Eseguibile
+
 Per distribuire l'applicazione come file unico portatile:
- 
-1. Assicurarsi di aver installato i requisiti.
-2. Eseguire lo script di build:
-   ```bash
-   python build_exe.py
-   ```
-3. Troverai il file `AutoBackupPortable.exe` nella cartella `dist`. Questo file può essere copiato su una chiavetta USB ed eseguito su qualsiasi PC Windows senza installazione.
+
+- Windows:
+  ```bash
+  python build_exe.py
+  ```
+- macOS:
+  ```bash
+  python build_mac.py
+  ```
+
+Troverai l'eseguibile nella cartella `dist`.
  
 ## Struttura del Progetto
- 
-- `main.py`: Interfaccia grafica e gestione del flusso (Wizard).
+
+- `main_gum.py`: Interfaccia CLI interattiva con Gum.
 - `backup_engine.py`: Logica di core (scansione, copia, verifica).
-- `build_exe.py`: Script per la creazione dell'eseguibile con PyInstaller.
+- `build_exe.py`: Script di build Windows con PyInstaller.
+- `build_mac.py`: Script di build macOS con PyInstaller.
+- `launchd/com.autobackup.agent.plist`: Template per schedulazione automatica su macOS.
+
+## Schedulazione automatica (macOS)
+
+Per eseguire il backup in automatico su macOS:
+
+1. Copia il file `launchd/com.autobackup.agent.plist` in `~/Library/LaunchAgents/` e modifica `USERNAME` e i percorsi.
+2. Carica l'agente:
+   ```bash
+   launchctl load -w ~/Library/LaunchAgents/com.autobackup.agent.plist
+   ```
+3. Log disponibili in `~/Library/Logs/AutoBackup/`.

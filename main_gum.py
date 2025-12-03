@@ -3,6 +3,7 @@ import sys
 import subprocess
 import psutil
 import time
+import shutil
 from backup_engine import BackupEngine
 from colorama import init, Fore, Style
 from tqdm import tqdm
@@ -24,26 +25,27 @@ class GumBackupApp:
         self.whitelist_paths = [os.path.expanduser("~")] # Default to user home
 
     def _find_gum(self):
-        # Check if running from PyInstaller bundle
         if hasattr(sys, '_MEIPASS'):
-            bundled_gum = os.path.join(sys._MEIPASS, "gum.exe")
-            if os.path.exists(bundled_gum):
-                return bundled_gum
-        
-        # Check current directory
-        local_gum = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gum.exe")
-        if os.path.exists(local_gum):
-            return local_gum
-            
-        # Check PATH (assuming 'gum' is in path)
+            path1 = os.path.join(sys._MEIPASS, "gum")
+            path2 = os.path.join(sys._MEIPASS, "gum.exe")
+            if os.path.exists(path1):
+                return path1
+            if os.path.exists(path2):
+                return path2
+        local_dir = os.path.dirname(os.path.abspath(__file__))
+        local1 = os.path.join(local_dir, "gum")
+        local2 = os.path.join(local_dir, "gum.exe")
+        if os.path.exists(local1):
+            return local1
+        if os.name == 'nt' and os.path.exists(local2):
+            return local2
         if shutil.which("gum"):
             return "gum"
-            
         return None
 
     def _run_gum(self, args, input_text=None):
         if not self.gum_exe:
-            print(Fore.RED + "Errore: gum.exe non trovato! Assicurati che sia nella cartella del programma.")
+            print(Fore.RED + "Errore: gum non trovato! Assicurati che sia nella cartella del programma o nel PATH.")
             sys.exit(1)
             
         cmd = [self.gum_exe] + args
@@ -336,9 +338,10 @@ class GumBackupApp:
         
         # 1. Identify all fixed drives
         fixed_drives = []
-        for part in psutil.disk_partitions():
-            if 'fixed' in part.opts or 'rw,fixed' in part.opts:
-                 fixed_drives.append(part.mountpoint)
+        if os.name == 'nt':
+            for part in psutil.disk_partitions():
+                if 'fixed' in part.opts or 'rw,fixed' in part.opts:
+                    fixed_drives.append(part.mountpoint)
         
         # Remove destination drive if it's in the list (to avoid recursion)
         dest_mount = self.selected_drive['mountpoint']

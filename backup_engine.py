@@ -4,6 +4,7 @@ import psutil
 import hashlib
 import threading
 import time
+import platform
 from pathlib import Path
 
 class BackupEngine:
@@ -22,29 +23,69 @@ class BackupEngine:
             "Archivi": [".zip", ".rar", ".7z", ".tar", ".gz"]
         }
         
-        self.system_folders = [
-            "Windows", "Program Files", "Program Files (x86)", "ProgramData", 
-            "$Recycle.Bin", "System Volume Information", "AppData",
-            "Boot", "Recovery", "PerfLogs", "Config.Msi", "Documents and Settings",
-            "MSOCache", "$WinREAgent", "OneDriveTemp", "Temp", "XboxGames", "WindowsApps", "Windows.old"
-        ]
+        if platform.system() == 'Darwin':
+            self.system_folders = [
+                "System", "Library", "Applications", "private", "usr", "var", 
+                ".Spotlight-V100", ".fseventsd", "Volumes"
+            ]
+        else:
+            self.system_folders = [
+                "Windows", "Program Files", "Program Files (x86)", "ProgramData", 
+                "$Recycle.Bin", "System Volume Information", "AppData",
+                "Boot", "Recovery", "PerfLogs", "Config.Msi", "Documents and Settings",
+                "MSOCache", "$WinREAgent", "OneDriveTemp", "Temp", "XboxGames", "WindowsApps", "Windows.old"
+            ]
 
     def get_removable_drives(self):
-        """Returns a list of removable drives (e.g., USB sticks)."""
         drives = []
-        for part in psutil.disk_partitions():
-            if 'removable' in part.opts or part.opts == 'rw,removable': # Check for removable attribute
-                try:
-                    usage = psutil.disk_usage(part.mountpoint)
-                    drives.append({
-                        'device': part.device,
-                        'mountpoint': part.mountpoint,
-                        'fstype': part.fstype,
-                        'total': usage.total,
-                        'free': usage.free
-                    })
-                except Exception:
-                    pass
+        if platform.system() == 'Darwin':
+            seen = set()
+            for part in psutil.disk_partitions():
+                if part.mountpoint.startswith('/Volumes/'):
+                    try:
+                        usage = psutil.disk_usage(part.mountpoint)
+                        key = part.mountpoint
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        drives.append({
+                            'device': part.device,
+                            'mountpoint': part.mountpoint,
+                            'fstype': part.fstype,
+                            'total': usage.total,
+                            'free': usage.free
+                        })
+                    except Exception:
+                        pass
+            if not drives and os.path.isdir('/Volumes'):
+                for name in os.listdir('/Volumes'):
+                    mp = os.path.join('/Volumes', name)
+                    if os.path.ismount(mp):
+                        try:
+                            usage = psutil.disk_usage(mp)
+                            drives.append({
+                                'device': mp,
+                                'mountpoint': mp,
+                                'fstype': '',
+                                'total': usage.total,
+                                'free': usage.free
+                            })
+                        except Exception:
+                            pass
+        else:
+            for part in psutil.disk_partitions():
+                if 'removable' in part.opts or part.opts == 'rw,removable':
+                    try:
+                        usage = psutil.disk_usage(part.mountpoint)
+                        drives.append({
+                            'device': part.device,
+                            'mountpoint': part.mountpoint,
+                            'fstype': part.fstype,
+                            'total': usage.total,
+                            'free': usage.free
+                        })
+                    except Exception:
+                        pass
         return drives
 
     def scan_files(self, source_drives, category_extensions_map, custom_extensions, exclusions, progress_callback=None):
@@ -73,6 +114,21 @@ class BackupEngine:
 
         for drive in source_drives:
             drive_path = Path(drive)
+            root_label = ""
+            if platform.system() == 'Darwin':
+                p = drive_path.as_posix()
+                if p.startswith('/Volumes/'):
+                    parts = drive_path.parts
+                    root_label = parts[2] if len(parts) > 2 else "Volume"
+                else:
+                    home = Path(os.path.expanduser("~"))
+                    try:
+                        if drive_path == home or str(drive_path).startswith(str(home)):
+                            root_label = "Home"
+                    except Exception:
+                        root_label = ""
+            else:
+                root_label = drive_path.anchor.replace(":", "")
             
             # Special handling for System Drive (usually C:)
             # If scanning C: ROOT, strictly limit to C:\Users
@@ -139,7 +195,8 @@ class BackupEngine:
                                     'source': str(file_path),
                                     'size': size,
                                     'category': category,
-                                    'rel_path': str(file_path.relative_to(drive_path)) # Keep path relative to drive root to maintain structure
+                                    'rel_path': str(file_path.relative_to(drive_path)),
+                                    'root_label': root_label
                                 })
                                 total_size += size
                                 
@@ -230,13 +287,9 @@ class BackupEngine:
                 break
 
             src = Path(file_info['source'])
-            # Create destination path: Dest / Category / OriginalStructure
-            # We handle drive letter in path by removing colon e.g. C: -> C
-            drive_letter = src.drive.replace(":", "")
+            label = file_info.get('root_label', "")
             target_structure = Path(file_info['rel_path'])
-            
-            # Final path: Dest/Category/SourceDrive/Path/To/File
-            dst = dest_path / file_info['category'] / drive_letter / target_structure
+            dst = dest_path / file_info['category'] / label / target_structure
             
             try:
                 dst.parent.mkdir(parents=True, exist_ok=True)
