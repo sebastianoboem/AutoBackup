@@ -5,6 +5,7 @@ import hashlib
 import threading
 import time
 import platform
+import subprocess
 from pathlib import Path
 
 class BackupEngine:
@@ -337,3 +338,259 @@ class BackupEngine:
 
     def resume(self):
         self.pause_event.set()
+
+
+class AndroidBackupEngine(BackupEngine):
+    def __init__(self):
+        super().__init__()
+        self.adb_exe = self._find_adb()
+        self.system_folders = [
+            "/Android/data", "/Android/obb", "/.thumbnails", "/.cache", "/LOST.DIR"
+        ]
+
+    def _find_adb(self):
+        # Check if adb is in path
+        if shutil.which("adb"):
+            return "adb"
+        # Check current directory
+        if os.path.exists(os.path.join(os.getcwd(), "adb.exe")):
+            return os.path.join(os.getcwd(), "adb.exe")
+        if os.path.exists(os.path.join(os.getcwd(), "adb")):
+            return os.path.join(os.getcwd(), "adb")
+        return None
+
+    def get_devices(self):
+        if not self.adb_exe:
+            return []
+        try:
+            output = subprocess.check_output([self.adb_exe, "devices", "-l"], text=True)
+            devices = []
+            for line in output.splitlines()[1:]: # Skip header
+                if not line.strip(): continue
+                parts = line.split()
+                if len(parts) >= 2 and parts[1] != "offline" and parts[1] != "unauthorized":
+                     # Format: serial device product:X model:Y device:Z
+                     model = "Unknown"
+                     for p in parts:
+                         if p.startswith("model:"):
+                             model = p.split(":")[1]
+                     devices.append({
+                         'id': parts[0],
+                         'model': model,
+                         'status': parts[1]
+                     })
+            return devices
+        except Exception:
+            return []
+
+    def scan_files(self, device_id, category_extensions_map, custom_extensions, exclusions, progress_callback=None):
+        if not self.adb_exe:
+            return [], 0
+
+        files_to_copy = []
+        total_size = 0
+        
+        # Compile allowed extensions
+        allowed_exts = set()
+        ext_to_cat = {}
+        for cat, exts in category_extensions_map.items():
+            for e in exts:
+                allowed_exts.add(e)
+                ext_to_cat[e] = cat
+        for e in custom_extensions:
+            allowed_exts.add(e)
+            if e not in ext_to_cat:
+                ext_to_cat[e] = "Altro"
+        allowed_exts = {e.lower() for e in allowed_exts}
+
+        # Construct find command
+        # We search in /sdcard/ (External Storage)
+        # Exclude common junk
+        
+        # Build exclude args for find
+        # find /sdcard -path "/sdcard/Android/data" -prune -o -path "/sdcard/Android/obb" -prune -o -type f -print
+        
+        base_path = "/sdcard"
+        
+        # Basic exclusions to prune
+        prune_paths = [f"{base_path}/Android/data", f"{base_path}/Android/obb", f"{base_path}/.thumbnails"]
+        # Add user exclusions if they look like absolute paths or relative
+        for excl in exclusions:
+            # Clean up exclusion string
+            excl = excl.replace("\\", "/")
+            if not excl.startswith("/"):
+                # Relative path: treat as *name* to exclude? Or path?
+                # Simpler: just skip it in python loop if complex, 
+                # but pruning in find is much faster.
+                pass
+            else:
+                # Absolute path (relative to sdcard root if user typed /Music)
+                if excl.startswith("/sdcard"):
+                    prune_paths.append(excl)
+                elif excl.startswith("/"):
+                     prune_paths.append(f"{base_path}{excl}")
+
+        cmd_parts = [self.adb_exe, "-s", device_id, "shell", "find", base_path]
+        
+        # Add prunes
+        # Syntax: ( -path "path1" -o -path "path2" ) -prune -o -type f -print
+        # But adb shell escaping is tricky.
+        # Let's try a simpler approach: fetch all files and filter in Python?
+        # No, listing all files in Android/data is HUGE (thousands of cache files).
+        # We MUST prune Android/data.
+        
+        # "find /sdcard \( -path '/sdcard/Android/data' -o -path '/sdcard/Android/obb' \) -prune -o -type f -print"
+        
+        # Constructing the find command string safely
+        # Note: On Android, paths are case sensitive usually.
+        
+        find_cmd = f"find {base_path} \\( -path '{base_path}/Android/data' -o -path '{base_path}/Android/obb' -o -path '*/.thumbnails' -o -path '*/.cache' \\) -prune -o -type f -print"
+        
+        try:
+            # Run find
+            process = subprocess.Popen(
+                [self.adb_exe, "-s", device_id, "shell", find_cmd],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding='utf-8',
+                errors='ignore'
+            )
+            
+            # Process output line by line
+            # Since we can't easily get size with standard find on all androids without -printf or stat loop,
+            # we will try to batch stat later OR just ignore size if it's too slow.
+            # But we need size for progress bar.
+            # Let's try to use `ls -l` for the found files? 
+            # No, too many files.
+            # Let's assume a dummy size first, or try to parse `ls -lR` instead of `find`.
+            
+            # Actually `ls -lR /sdcard` is robust enough usually.
+            # But parsing `ls -lR` is painful because of date formats.
+            
+            # Let's stick to `find` and then maybe do a batch `ls -l`?
+            # Or use `du -a`? `du -a /sdcard` gives size (blocks) and path.
+            # `du -k -a /sdcard` -> size in KB.
+            # `du` output: `1024   /sdcard/DCIM/Camera/IMG.jpg`
+            # This is good! Android `du` is usually available.
+            
+            pass
+        except Exception:
+            pass
+            
+        # Retrying with `du -a` approach which gives size and filtering
+        # But du includes directories.
+        # And we still want to prune Android/data before du scans it (it's slow).
+        # `du` doesn't support prune usually on Android toybox.
+        
+        # Back to `find`.
+        # Let's just use `find` to get paths. Then `ls -l` specific files? No.
+        # Let's try `stat -c '%s|%n'`.
+        # If stat is available (Android 6.0+), it's the best.
+        
+        stat_cmd = f"find {base_path} \\( -path '{base_path}/Android/data' -o -path '{base_path}/Android/obb' -o -path '*/.thumbnails' -o -path '*/.cache' \\) -prune -o -type f -exec stat -c '%s|%n' {{}} +"
+        
+        # If stat fails, we fallback to just name and 0 size (or unknown).
+        
+        try:
+            # We execute the command.
+            # Note: `+` at end of exec might be problematic if too many files, but `find` handles it.
+            
+            output = subprocess.check_output(
+                [self.adb_exe, "-s", device_id, "shell", stat_cmd],
+                text=True,
+                encoding='utf-8',
+                errors='ignore'
+            )
+            
+            for line in output.splitlines():
+                if "|" not in line: continue
+                try:
+                    size_str, path = line.split("|", 1)
+                    size = int(size_str)
+                    path = path.strip()
+                    
+                    # Filter extensions
+                    ext = os.path.splitext(path)[1].lower()
+                    if ext in allowed_exts:
+                        # Filter exclusions (python side for extra safety and custom user exclusions)
+                        if self._is_excluded_android(path, exclusions):
+                            continue
+                            
+                        cat = ext_to_cat.get(ext, "Altro")
+                        rel_path = os.path.relpath(path, base_path) # e.g. DCIM/Camera/img.jpg
+                        
+                        files_to_copy.append({
+                            'source': path, # Remote path
+                            'size': size,
+                            'category': cat,
+                            'rel_path': rel_path,
+                            'root_label': "Android",
+                            'device_id': device_id
+                        })
+                        total_size += size
+                        
+                        if progress_callback:
+                            progress_callback("scanning", os.path.basename(path))
+                            
+                except ValueError:
+                    continue
+                    
+        except subprocess.CalledProcessError:
+            # Fallback if stat or find fails (e.g. old android)
+            # We return empty or try simpler find without size
+            pass
+            
+        return files_to_copy, total_size
+
+    def _is_excluded_android(self, path, exclusions):
+        # Path is a string here (remote path)
+        # exclusions are list of strings
+        for excl in exclusions:
+            # clean path separators
+            p = path.replace("\\", "/").lower()
+            e = excl.replace("\\", "/").lower()
+            if e in p: # Simple substring match for now
+                 return True
+        return False
+
+    def copy_files(self, files_list, destination_root, verify=True, progress_callback=None):
+        copied_count = 0
+        copied_size = 0
+        errors = []
+        
+        if not self.adb_exe:
+            return 0, ["ADB not found"]
+
+        dest_path = Path(destination_root) / f"Android_Backup_{int(time.time())}"
+        dest_path.mkdir(parents=True, exist_ok=True)
+        
+        for file_info in files_list:
+             # Check Stop
+            if self.stop_event.is_set():
+                break
+                
+            src = file_info['source']
+            device_id = file_info.get('device_id')
+            rel = file_info['rel_path']
+            cat = file_info['category']
+            
+            dst = dest_path / cat / rel
+            
+            try:
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                
+                if progress_callback:
+                    progress_callback("copying", os.path.basename(src), copied_size)
+                
+                # adb pull
+                cmd = [self.adb_exe, "-s", device_id, "pull", src, str(dst)]
+                subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                
+                copied_count += 1
+                copied_size += file_info['size']
+                
+            except Exception as e:
+                errors.append(f"Error pulling {src}: {e}")
+                
+        return copied_count, errors

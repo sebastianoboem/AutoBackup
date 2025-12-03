@@ -4,7 +4,7 @@ import subprocess
 import psutil
 import time
 import shutil
-from backup_engine import BackupEngine
+from backup_engine import BackupEngine, AndroidBackupEngine
 from colorama import init, Fore, Style
 from tqdm import tqdm
 
@@ -13,7 +13,10 @@ init(autoreset=True)
 
 class GumBackupApp:
     def __init__(self):
+        self.mode = "PC" # Default
         self.engine = BackupEngine()
+        self.android_engine = None
+        self.android_device_id = None
         self.selected_categories = []
         self.custom_extensions = []
         self.exclusions = []
@@ -50,10 +53,6 @@ class GumBackupApp:
             
         cmd = [self.gum_exe] + args
         try:
-            # We capture stdout to get the result (selection/text)
-            # We DO NOT capture stderr so the interactive UI is shown to the user
-            # We DO NOT capture stdin unless we are passing input_text
-            
             kwargs = {
                 'stdout': subprocess.PIPE,
                 'text': True,
@@ -71,27 +70,65 @@ class GumBackupApp:
             sys.exit(1)
 
     def clear_screen(self):
-        # Try using gum clear for better compatibility if available
         if self.gum_exe:
-             # subprocess.run([self.gum_exe, "clear"]) # gum doesn't have clear, but we can just use system clear
-             # Actually standard clear is fine, but let's ensure it fully clears scrollback if possible
-             # or just rely on system cls/clear which is standard.
              os.system('cls' if os.name == 'nt' else 'clear')
         else:
              os.system('cls' if os.name == 'nt' else 'clear')
 
     def print_header(self, title):
         self.clear_screen()
-        # Use gum style if possible, otherwise fallback
         if self.gum_exe:
             self._run_gum(["style", "--foreground", "212", "--border", "double", "--padding", "0 1", "--margin", "1", f"AutoBackup (Gum) - {title}"])
         else:
             print(Fore.MAGENTA + Style.BRIGHT + f"--- AutoBackup (Gum) - {title} ---")
 
+    def step_select_mode(self):
+        self.print_header("Seleziona Modalità")
+        res = self._run_gum(["choose", "--header", "Che tipo di backup vuoi effettuare?", "Backup da PC/Mac", "Backup da Android"])
+        
+        if res.returncode != 0:
+            sys.exit()
+            
+        if "Android" in res.stdout:
+            self.mode = "Android"
+            self.android_engine = AndroidBackupEngine()
+            
+            # Check ADB
+            if not self.android_engine.adb_exe:
+                print(Fore.RED + "ADB non trovato. Installalo o assicurati che sia nel PATH.")
+                sys.exit(1)
+                
+            while True:
+                devices = self.android_engine.get_devices()
+                if not devices:
+                    print(Fore.RED + "Nessun dispositivo Android trovato via ADB.")
+                    print(Fore.YELLOW + "Assicurati che:")
+                    print("1. Il debug USB sia attivo.")
+                    print("2. Il telefono sia collegato.")
+                    print("3. Hai autorizzato il computer sul telefono.")
+                    res = self._run_gum(["confirm", "Riprovare?"])
+                    if res.returncode == 0:
+                        continue
+                    else:
+                        sys.exit()
+                
+                if len(devices) > 1:
+                    # Select device
+                    choices = [f"{d['id']} ({d['model']})" for d in devices]
+                    res = self._run_gum(["choose", "--header", "Seleziona dispositivo"] + choices)
+                    selected_id = res.stdout.strip().split()[0]
+                    self.android_device_id = selected_id
+                    break
+                else:
+                    self.android_device_id = devices[0]['id']
+                    print(Fore.GREEN + f"Dispositivo rilevato: {devices[0]['model']} ({devices[0]['id']})")
+                    time.sleep(1)
+                    break
+        else:
+            self.mode = "PC"
+
     def step0_test_mode(self):
         self.print_header("Modalità Test")
-        
-        # Gum confirm for test mode
         res = self._run_gum(["confirm", "Abilitare la modalità TEST (limitata a 10 file per tipo)?"])
         if res.returncode == 0:
             self.test_mode = True
@@ -104,16 +141,9 @@ class GumBackupApp:
         self.print_header("Filtri File")
         
         cats = list(self.engine.categories.keys())
-        
-        # Default selection: Documenti, Immagini, Video
         default_selected = ["Documenti", "Immagini", "Video"]
-        
         print(Fore.CYAN + "Seleziona le categorie da includere:")
         
-        # Gum choose for categories
-        # --no-limit allows multiple selection
-        # --cursor="-> " format to avoid issue where "-> " is interpreted as a flag
-        # --selected sets the default checked items
         res = self._run_gum([
             "choose", 
             "--no-limit", 
@@ -132,53 +162,33 @@ class GumBackupApp:
             time.sleep(1)
             sys.exit()
 
-        # --- NEW: Select specific extensions PER CATEGORY ---
-        # We iterate through each selected category and ask the user to refine extensions for that category.
         self.active_category_map = {}
-        
-        # Extensions to be deselected by default
         default_deselected_exts = [
             ".txt", ".gif", ".bmp", ".tiff", ".raw", ".ico", 
             ".mkv", ".flv", ".flac", ".ogg", ".aac", ".tar", ".gz"
         ]
         
         for cat in self.selected_categories:
-            self.clear_screen() # Clear screen before showing extra folders info to avoid clutter from previous steps
+            self.clear_screen()
             exts = sorted(self.engine.categories[cat])
-            
-            # Skip if no extensions (shouldn't happen)
-            if not exts:
-                continue
-                
-            # Determine which extensions are selected by default
-            # Select ALL minus the ones in default_deselected_exts
+            if not exts: continue
             pre_selected = [e for e in exts if e not in default_deselected_exts]
-                
-            # self.print_header(f"Filtro Estensioni per {cat}:")
             print(Fore.CYAN + f"Filtro Estensioni per {cat}:")
             print(Fore.CYAN + "Seleziona le estensioni che vuoi copiare")
-            
-            # Gum choose for extensions of this category
-            # Note: gum choose --selected expects a comma-separated list of values to be pre-selected
             
             gum_args = [
                 "choose", 
                 "--no-limit", 
                 "--height", "10", 
                 "--cursor=-> ", 
-                "--header=", # Empty header because we printed it manually above
+                "--header=", 
             ]
-            
             if pre_selected:
                 gum_args.extend(["--selected", ",".join(pre_selected)])
-                
             gum_args.extend(exts)
             
             res = self._run_gum(gum_args)
-            
-            if res.returncode != 0:
-                sys.exit()
-                
+            if res.returncode != 0: sys.exit()
             selected_exts_list = [x for x in res.stdout.strip().split('\n') if x]
             
             if selected_exts_list:
@@ -187,28 +197,20 @@ class GumBackupApp:
                 print(Fore.YELLOW + f"Nessuna estensione selezionata per {cat}. La categoria verrà ignorata.")
                 time.sleep(1)
 
-        # Check if we have any categories left active
         if not self.active_category_map:
              print(Fore.RED + "\nNessuna categoria/estensione attiva selezionata.")
              time.sleep(2)
              sys.exit()
 
-        # Custom Extensions
-        # Gum confirm: default is "No" (return code 1), so we invert logic or check specifically.
-        self.clear_screen() # Clear screen before showing extra folders info to avoid clutter from previous steps
-        
+        self.clear_screen()
         res = self._run_gum(["confirm", "--default=false", "Vuoi aggiungere estensioni personalizzate?"])
-        if res.returncode == 0: # 0 = Yes
+        if res.returncode == 0:
             res_input = self._run_gum(["input", "--placeholder", "es. .log, .dat"])
             exts = res_input.stdout.strip()
             if exts:
                 self.custom_extensions = [e.strip() for e in exts.split(",") if e.strip()]
 
-        # --- NEW: Whitelist Paths ---
-        # Replaces "Extra Folders" and "Auto-included" display
-        # Note: self.whitelist_paths is initialized with user home in __init__
         self.clear_screen()
-        
         print(Fore.CYAN + "Definizione Percorsi di Ricerca")
         print(Fore.CYAN + "Default: Ricerca automatica su tutti i dischi fissi.")
         print(Fore.CYAN + "Opzionale: Puoi specificare una lista di cartelle precise (Whitelist).")
@@ -221,20 +223,16 @@ class GumBackupApp:
              print(Fore.YELLOW + "\nWhitelist attuale: (Nessuna - Scansione Completa)")
              
         print("")
-        
         res = self._run_gum(["confirm", "--default=false", "Vuoi modificare la lista delle cartelle esclusive?"])
         if res.returncode == 0:
              print(Fore.CYAN + "\nInserisci i percorsi da scansionare (uno per riga).")
              print(Fore.CYAN + "Premi CTRL+D (o CTRL+Z su Windows) poi INVIO per terminare.")
-             
-             # Pre-fill if existing
              current_value = "\n".join(self.whitelist_paths) if self.whitelist_paths else ""
-             
              res_write = self._run_gum(["write", "--value", current_value, "--placeholder", "Esempio:\nC:\\Dati_Importanti\nD:\\Foto_Vacanze"])
              
              if res_write.returncode == 0:
                  paths = res_write.stdout.strip().split('\n')
-                 self.whitelist_paths = [] # Reset
+                 self.whitelist_paths = []
                  for p in paths:
                      clean_p = p.strip()
                      if clean_p:
@@ -251,38 +249,30 @@ class GumBackupApp:
                   print(Fore.YELLOW + "Nessun percorso valido inserito. Si userà la ricerca standard (tutti i dischi).")
                   time.sleep(2)
 
-        # --- NEW: Extra Exclusions to Add ---
         self.clear_screen()
-        
-        # Initialize exclusions with defaults if empty
         if not self.exclusions:
-            self.exclusions = list(self.engine.system_folders)
+            if self.mode == "Android":
+                self.exclusions = list(self.android_engine.system_folders)
+            else:
+                self.exclusions = list(self.engine.system_folders)
 
-        # Show current auto-excluded paths (System folders + Dot folders)
         print(Fore.CYAN + "Gestione Esclusioni")
         print(Fore.CYAN + "Definisci quali cartelle ignorare.")
         print(Fore.RED + "   - Cartelle nascoste (es. .git, .venv, $Recycle.Bin) sono SEMPRE escluse.")
-        
-        # Show preview of current exclusions
         print(Fore.YELLOW + "\nEsclusioni attuali (Default):")
         for excl in self.exclusions:
             print(Fore.YELLOW + f"   - {excl}")
-        print("") # spacing
+        print("")
 
-        # Ask if user wants to add extra exclusions
         res = self._run_gum(["confirm", "--default=false", "Vuoi modificare la lista delle esclusioni?"])
         if res.returncode == 0:
             print(Fore.CYAN + "\nModifica i percorsi da escludere (uno per riga).")
             print(Fore.CYAN + "Premi CTRL+D (o CTRL+Z su Windows) poi INVIO per salvare.")
-             
-            # Pre-fill with current exclusions (defaults + custom)
             current_value = "\n".join(self.exclusions)
-            
             res_write = self._run_gum(["write", "--value", current_value, "--width", "80", "--height", "15"])
-             
             if res_write.returncode == 0:
                 paths = res_write.stdout.strip().split('\n')
-                self.exclusions = [] # Reset and rebuild from user input
+                self.exclusions = []
                 for p in paths:
                     clean_p = p.strip()
                     if clean_p:
@@ -294,18 +284,14 @@ class GumBackupApp:
 
     def step2_select_drive(self):
         self.print_header("Destinazione")
-        
         while True:
             drives = self.engine.get_removable_drives()
-            
             if not drives:
                 print(Fore.RED + "Nessuna unità USB trovata!")
                 res = self._run_gum(["confirm", "Riprovare?"])
-                if res.returncode != 0:
-                    sys.exit()
+                if res.returncode != 0: sys.exit()
                 continue
             
-            # Prepare choices for gum
             drive_map = {}
             choices = []
             for d in drives:
@@ -314,16 +300,10 @@ class GumBackupApp:
                 choices.append(label)
             
             choices.append("Aggiorna Lista")
-            
             res = self._run_gum(["choose", "--header", "Scegli l'unità di destinazione"] + choices)
             selection = res.stdout.strip()
-            
-            if not selection:
-                sys.exit()
-                
-            if selection == "Aggiorna Lista":
-                continue
-                
+            if not selection: sys.exit()
+            if selection == "Aggiorna Lista": continue
             self.selected_drive = drive_map[selection]
             break
 
@@ -333,64 +313,60 @@ class GumBackupApp:
         # Use the filtered map instead of raw categories
         cat_map = self.active_category_map
         
-        # Logic for scan roots
         all_scan_roots = []
         
-        # 1. Identify all fixed drives
-        fixed_drives = []
-        if os.name == 'nt':
-            for part in psutil.disk_partitions():
-                if 'fixed' in part.opts or 'rw,fixed' in part.opts:
-                    fixed_drives.append(part.mountpoint)
-        
-        # Remove destination drive if it's in the list (to avoid recursion)
-        dest_mount = self.selected_drive['mountpoint']
-        if dest_mount in fixed_drives:
-            fixed_drives.remove(dest_mount)
+        if self.mode == "PC":
+            # 1. Identify all fixed drives
+            fixed_drives = []
+            if os.name == 'nt':
+                for part in psutil.disk_partitions():
+                    if 'fixed' in part.opts or 'rw,fixed' in part.opts:
+                        fixed_drives.append(part.mountpoint)
             
-        # 2. Apply Whitelist Logic PER DRIVE
-        # Algorithm:
-        # Iterate through each fixed drive.
-        # Check if there are any whitelist paths that belong to this drive.
-        # IF YES: Add ONLY those whitelist paths for this drive.
-        # IF NO: Add the entire drive root.
-        
-        # Helper to check if path is on drive
-        def is_on_drive(path, drive_root):
-            try:
-                # Normalize paths
-                p_abs = os.path.abspath(path).lower()
-                d_abs = os.path.abspath(drive_root).lower()
-                # Drive root usually ends with backslash (C:\), but if not we ensure it
-                if not d_abs.endswith(os.sep):
-                    d_abs += os.sep
-                return p_abs.startswith(d_abs)
-            except:
-                return False
+            # Remove destination drive if it's in the list (to avoid recursion)
+            dest_mount = self.selected_drive['mountpoint']
+            if dest_mount in fixed_drives:
+                fixed_drives.remove(dest_mount)
                 
-        used_whitelist_paths = []
-        
-        for drive in fixed_drives:
-            # Find whitelist entries for this drive
-            drive_specific_paths = []
-            if self.whitelist_paths:
-                for wp in self.whitelist_paths:
-                    if is_on_drive(wp, drive):
-                        drive_specific_paths.append(wp)
+            # 2. Apply Whitelist Logic PER DRIVE
+            # Helper to check if path is on drive
+            def is_on_drive(path, drive_root):
+                try:
+                    # Normalize paths
+                    p_abs = os.path.abspath(path).lower()
+                    d_abs = os.path.abspath(drive_root).lower()
+                    # Drive root usually ends with backslash (C:\), but if not we ensure it
+                    if not d_abs.endswith(os.sep):
+                        d_abs += os.sep
+                    return p_abs.startswith(d_abs)
+                except:
+                    return False
+                    
+            used_whitelist_paths = []
             
-            if drive_specific_paths:
-                # Whitelist applies for this drive: Scan ONLY specific paths
-                all_scan_roots.extend(drive_specific_paths)
-                used_whitelist_paths.extend(drive_specific_paths)
-            else:
-                # No whitelist for this drive: Scan FULL drive
-                all_scan_roots.append(drive)
-        
-        # Also add any whitelist paths that might not match a fixed drive (e.g. network shares if supported later, or edge cases)
-        # But for now, if a user added a path that wasn't detected as part of a fixed drive, we should probably add it anyway to be safe.
-        for wp in self.whitelist_paths:
-            if wp not in used_whitelist_paths:
-                all_scan_roots.append(wp)
+            for drive in fixed_drives:
+                # Find whitelist entries for this drive
+                drive_specific_paths = []
+                if self.whitelist_paths:
+                    for wp in self.whitelist_paths:
+                        if is_on_drive(wp, drive):
+                            drive_specific_paths.append(wp)
+                
+                if drive_specific_paths:
+                    # Whitelist applies for this drive: Scan ONLY specific paths
+                    all_scan_roots.extend(drive_specific_paths)
+                    used_whitelist_paths.extend(drive_specific_paths)
+                else:
+                    # No whitelist for this drive: Scan FULL drive
+                    all_scan_roots.append(drive)
+            
+            # Also add any whitelist paths that might not match a fixed drive
+            for wp in self.whitelist_paths:
+                if wp not in used_whitelist_paths:
+                    all_scan_roots.append(wp)
+        else:
+            # Android Mode
+            all_scan_roots = ["Android Device"]
 
         # --- RESOCONTO PRE-SCANSIONE ---
         self.print_header("Resoconto Configurazioni")
@@ -398,47 +374,50 @@ class GumBackupApp:
         print(Fore.CYAN + "Stai per avviare la ricerca con queste impostazioni:\n")
         
         print(Fore.WHITE + Style.BRIGHT + "Modalità:")
+        print(f"   - Tipo: {self.mode}")
         print(f"   - Test Mode: {'ATTIVA (Max 10 file)' if self.test_mode else 'Disattivata (Copia completa)'}")
-        if self.whitelist_paths:
-             print(f"   - Strategia Scansione: MISTA (Whitelist per drive / Full per gli altri)")
-        else:
-             print(f"   - Strategia Scansione: COMPLETA (Tutti i dischi fissi)")
+        
+        if self.mode == "PC":
+            if self.whitelist_paths:
+                 print(f"   - Strategia Scansione: MISTA (Whitelist per drive / Full per gli altri)")
+            else:
+                 print(f"   - Strategia Scansione: COMPLETA (Tutti i dischi fissi)")
         
         print(Fore.WHITE + Style.BRIGHT + "\nDestinazione:")
         print(f"   - Unità: {self.selected_drive['mountpoint']} [{self.selected_drive['device']}]")
         print(f"   - Spazio Libero: {self.selected_drive['free']//(1024**3)} GB")
         
         print(Fore.WHITE + Style.BRIGHT + "\nPercorsi di Scansione Effettivi:")
-        for root in all_scan_roots:
-            # Check if it's a full drive or a specific folder for display
-            is_drive_root = False
-            if os.name == 'nt':
-                 if len(root) <= 3 and root.endswith(':\\'): is_drive_root = True
-            
-            if is_drive_root:
-                print(Fore.GREEN + f"   - {root} (Intero Disco)")
-            else:
-                print(Fore.GREEN + f"   - {root} (Cartella Specifica)")
+        if self.mode == "PC":
+            for root in all_scan_roots:
+                # Check if it's a full drive or a specific folder for display
+                is_drive_root = False
+                if os.name == 'nt':
+                     if len(root) <= 3 and root.endswith(':\\'): is_drive_root = True
+                
+                if is_drive_root:
+                    print(Fore.GREEN + f"   - {root} (Intero Disco)")
+                else:
+                    print(Fore.GREEN + f"   - {root} (Cartella Specifica)")
+        else:
+             print(Fore.GREEN + f"   - /sdcard (Memoria Interna Android)")
 
-        if self.extra_folders: # Legacy check, though extra_folders is removed from UI, kept for safety
+        if self.extra_folders: # Legacy check
              for f in self.extra_folders:
                  print(Fore.GREEN + f"   - {os.path.abspath(f)}")
             
         print(Fore.WHITE + Style.BRIGHT + "\nPercorsi ESCLUSI:")
         
-        # Deduplicate for display
-        # If exclusions list is empty (default), we show system folders.
-        # If user modified it, we show what is in self.exclusions.
-        # We categorize them for clarity.
+        display_exclusions = self.exclusions
         
-        display_exclusions = self.exclusions if self.exclusions else self.engine.system_folders
-        
-        # Separate system defaults from custom additions for cleaner display
         system_excl_display = []
         custom_excl_display = []
         
+        # Use correct system folders list for check
+        sys_folders = self.android_engine.system_folders if self.mode == "Android" else self.engine.system_folders
+        
         for excl in display_exclusions:
-             if excl in self.engine.system_folders:
+             if excl in sys_folders:
                  system_excl_display.append(excl)
              else:
                  custom_excl_display.append(excl)
@@ -453,7 +432,10 @@ class GumBackupApp:
             for e in custom_excl_display:
                  print(Fore.RED + f"     * {e}")
                  
-        print(Fore.RED + "   - [Auto] Tutte le cartelle che iniziano con '.' (es. .git) o '$' (es. $Recycle.Bin)")
+        if self.mode == "PC":
+            print(Fore.RED + "   - [Auto] Tutte le cartelle che iniziano con '.' (es. .git) o '$' (es. $Recycle.Bin)")
+        else:
+            print(Fore.RED + "   - [Auto] Cartelle nascoste (es. .thumbnails)")
             
         print(Fore.WHITE + Style.BRIGHT + "\nFiltri Attivi:")
         for cat, exts in cat_map.items():
@@ -472,7 +454,10 @@ class GumBackupApp:
 
         print(Fore.YELLOW + "Avvio analisi file in corso...")
         
-        files, size = self.engine.scan_files(all_scan_roots, cat_map, self.custom_extensions, self.exclusions)
+        if self.mode == "PC":
+            files, size = self.engine.scan_files(all_scan_roots, cat_map, self.custom_extensions, self.exclusions)
+        else:
+            files, size = self.android_engine.scan_files(self.android_device_id, cat_map, self.custom_extensions, self.exclusions)
         
         if self.test_mode:
             print(Fore.YELLOW + "Applicazione filtro TEST MODE (max 10 file per categoria)...")
@@ -521,7 +506,11 @@ class GumBackupApp:
                 pbar.update(delta)
 
         try:
-            count, errors = self.engine.copy_files(files, dest, progress_callback=progress_callback)
+            if self.mode == "PC":
+                count, errors = self.engine.copy_files(files, dest, progress_callback=progress_callback)
+            else:
+                count, errors = self.android_engine.copy_files(files, dest, progress_callback=progress_callback)
+                
             pbar.close()
             
             self.print_header("Completato")
@@ -539,10 +528,14 @@ class GumBackupApp:
                 
         except KeyboardInterrupt:
             print(Fore.RED + "\n\nInterrotto!")
-            self.engine.stop()
+            if self.mode == "PC":
+                self.engine.stop()
+            else:
+                self.android_engine.stop()
 
     def run(self):
         try:
+            self.step_select_mode()
             self.step0_test_mode()
             self.step1_select_filters()
             self.step2_select_drive()
@@ -552,6 +545,5 @@ class GumBackupApp:
             print("\nUscita.")
 
 if __name__ == "__main__":
-    import shutil
     app = GumBackupApp()
     app.run()
