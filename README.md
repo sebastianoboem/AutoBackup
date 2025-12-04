@@ -39,7 +39,7 @@ Un'applicazione portatile per il backup dei dati sviluppata in Python, progettat
    Oppure manualmente:
    ```bash
    source .venv/bin/activate
-   python main_gum.py
+   python main.py
    ```
  
 ### 2. Creare l'Eseguibile
@@ -58,8 +58,8 @@ Per distribuire l'applicazione come file unico portatile:
 Troverai l'eseguibile nella cartella `dist`.
  
 ## Struttura del Progetto
-
-- `main_gum.py`: Interfaccia CLI interattiva con Gum.
+ 
+- `main.py`: Interfaccia CLI interattiva con Gum.
 - `backup_engine.py`: Logica di core (scansione, copia, verifica).
 - `build_exe.py`: Script di build Windows con PyInstaller.
 - `build_mac.py`: Script di build macOS con PyInstaller.

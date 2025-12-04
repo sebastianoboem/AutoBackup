@@ -41,4 +41,4 @@ fi
 
 # Avvio script
 echo "🚀 Avvio AutoBackup..."
-python main_gum.py
+python main.py

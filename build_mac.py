@@ -10,7 +10,7 @@ def build():
         shutil.rmtree('dist')
     gum_path = _shutil.which('gum')
     args = [
-        'main_gum.py',
+        'main.py',
         '--name=AutoBackupGum',
         '--onefile',
         '--console',

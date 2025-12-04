@@ -19,7 +19,7 @@ def build():
         input("Premi Invio per continuare comunque (la build potrebbe fallire o non funzionare)...")
 
     args = [
-        'main_gum.py',
+        'main.py',
         '--name=AutoBackupGum',
         '--onefile',
         '--console',
