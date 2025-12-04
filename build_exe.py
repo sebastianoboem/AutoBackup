@@ -20,7 +20,7 @@ def build():
 
     args = [
         'main.py',
-        '--name=AutoBackupGum',
+        '--name=AutoBackupPC-ANDROID',
         '--onefile',
         '--console',
         '--icon=NONE',

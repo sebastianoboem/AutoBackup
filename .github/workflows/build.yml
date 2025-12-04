@@ -1,0 +1,91 @@
+name: Build AutoBackup
+
+on:
+  push:
+    branches: [ "main", "master" ]
+    tags: [ "v*" ]
+  pull_request:
+    branches: [ "main", "master" ]
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+        
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        
+    - name: Download Gum (Windows)
+      run: |
+        Invoke-WebRequest -Uri "https://github.com/charmbracelet/gum/releases/download/v0.17.0/gum_0.17.0_Windows_x86_64.zip" -OutFile "gum.zip"
+        Expand-Archive gum.zip -DestinationPath gum_extracted
+        Copy-Item gum_extracted/gum_0.17.0_Windows_x86_64/gum.exe -Destination .
+        
+    - name: Build with PyInstaller
+      run: python build_exe.py
+      
+    - name: Upload Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: AutoBackupPC-ANDROID
+        path: dist/AutoBackupPC-ANDROID.exe
+
+  build-macos:
+    runs-on: macos-latest
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+        
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        
+    - name: Install Gum (macOS)
+      run: brew install gum
+      
+    - name: Build with PyInstaller
+      run: python build_mac.py
+      
+    - name: Upload Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: AutoBackupMAC
+        path: dist/AutoBackupMAC
+
+  release:
+    needs: [build-windows, build-macos]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - name: Download Windows Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: AutoBackupPC-ANDROID
+          path: release_assets
+
+      - name: Download macOS Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: AutoBackupMAC
+          path: release_assets
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: release_assets/*

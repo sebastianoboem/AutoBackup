@@ -11,7 +11,7 @@ def build():
     gum_path = _shutil.which('gum')
     args = [
         'main.py',
-        '--name=AutoBackupGum',
+        '--name=AutoBackupMAC',
         '--onefile',
         '--console',
         '--icon=NONE',
