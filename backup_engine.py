@@ -18,9 +18,9 @@ class BackupEngine:
         # Default Categories
         self.categories = {
             "Documenti": [".doc", ".docx", ".pdf", ".txt", ".xlsx", ".xls", ".pptx", ".ppt", ".odt"],
-            "Immagini": [".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tiff", ".raw", ".ico"],
-            "Video": [".mp4", ".avi", ".mkv", ".mov", ".wmv", ".flv"],
-            "Audio": [".mp3", ".wav", ".aac", ".flac", ".ogg", ".wma"],
+            "Immagini": [".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tiff", ".raw", ".ico", ".heic", ".heif", ".webp"],
+            "Video": [".mp4", ".avi", ".mkv", ".mov", ".wmv", ".flv", ".webm"],
+            "Audio": [".mp3", ".wav", ".aac", ".flac", ".ogg", ".wma", ".m4a"],
             "Archivi": [".zip", ".rar", ".7z", ".tar", ".gz"]
         }
         
@@ -488,59 +488,117 @@ class AndroidBackupEngine(BackupEngine):
         # Let's try `stat -c '%s|%n'`.
         # If stat is available (Android 6.0+), it's the best.
         
-        stat_cmd = f"find {base_path} \\( -path '{base_path}/Android/data' -o -path '{base_path}/Android/obb' -o -path '*/.thumbnails' -o -path '*/.cache' \\) -prune -o -type f -exec stat -c '%s|%n' {{}} +"
-        
-        # If stat fails, we fallback to just name and 0 size (or unknown).
-        
+        # 1. Get list of top-level folders in /sdcard to scan individually
+        # This avoids "Permission denied" on one folder killing the whole find command
+        folders_to_scan = []
         try:
-            # We execute the command.
-            # Note: `+` at end of exec might be problematic if too many files, but `find` handles it.
-            
-            output = subprocess.check_output(
-                [self.adb_exe, "-s", device_id, "shell", stat_cmd],
-                text=True,
-                encoding='utf-8',
-                errors='ignore'
-            )
-            
-            for line in output.splitlines():
-                if "|" not in line: continue
-                try:
-                    size_str, path = line.split("|", 1)
-                    size = int(size_str)
-                    path = path.strip()
-                    
-                    # Filter extensions
-                    ext = os.path.splitext(path)[1].lower()
-                    if ext in allowed_exts:
-                        # Filter exclusions (python side for extra safety and custom user exclusions)
-                        if self._is_excluded_android(path, exclusions):
-                            continue
-                            
-                        cat = ext_to_cat.get(ext, "Altro")
-                        rel_path = os.path.relpath(path, base_path) # e.g. DCIM/Camera/img.jpg
-                        
-                        files_to_copy.append({
-                            'source': path, # Remote path
-                            'size': size,
-                            'category': cat,
-                            'rel_path': rel_path,
-                            'root_label': "Android",
-                            'device_id': device_id
-                        })
-                        total_size += size
-                        
-                        if progress_callback:
-                            progress_callback("scanning", os.path.basename(path))
-                            
-                except ValueError:
+            ls_cmd = [self.adb_exe, "-s", device_id, "shell", "ls", "-1", base_path]
+            ls_out = subprocess.check_output(ls_cmd, text=True, encoding='utf-8', errors='ignore')
+            for line in ls_out.splitlines():
+                folder = line.strip()
+                if not folder: continue
+                # Skip known bad/system folders
+                if folder in ["Android", "lost+found", ".thumbnails", ".cache", "Backups", ".git"]:
                     continue
-                    
-        except subprocess.CalledProcessError:
-            # Fallback if stat or find fails (e.g. old android)
-            # We return empty or try simpler find without size
-            pass
-            
+                if folder.startswith("."):
+                    continue
+                
+                folders_to_scan.append(f"{base_path}/{folder}")
+        except Exception:
+            # Fallback if ls fails: use standard folders
+            folders_to_scan = [
+                f"{base_path}/DCIM", f"{base_path}/Pictures", f"{base_path}/Download", 
+                f"{base_path}/Documents", f"{base_path}/Music", f"{base_path}/Movies",
+                f"{base_path}/WhatsApp", f"{base_path}/Telegram"
+            ]
+
+        # 2. Scan each folder individually
+        for folder in folders_to_scan:
+            # Try with stat first for this folder
+            try:
+                # Construct stat command for this specific folder
+                # We still prune thumbnails/cache if found inside
+                stat_cmd = f"find '{folder}' \\( -path '*/.thumbnails' -o -path '*/.cache' -o -path '*/Android/data' \\) -prune -o -type f -exec stat -c '%s|%n' {{}} +"
+                
+                result = subprocess.run(
+                    [self.adb_exe, "-s", device_id, "shell", stat_cmd],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    encoding='utf-8',
+                    errors='ignore',
+                    check=False
+                )
+                
+                output = result.stdout
+                if not output and result.returncode != 0:
+                     # If stat failed, try simple find for this folder immediately
+                     raise Exception("Stat failed")
+
+                for line in output.splitlines():
+                    if "|" not in line: continue
+                    try:
+                        size_str, path = line.split("|", 1)
+                        size = int(size_str)
+                        path = path.strip()
+                        
+                        # Check for duplicates (files_to_copy is list of dicts, inefficient check but safe for small counts)
+                        # For speed, we trust path uniqueness from find
+                        
+                        ext = os.path.splitext(path)[1].lower()
+                        if ext in allowed_exts:
+                            if self._is_excluded_android(path, exclusions): continue
+                            cat = ext_to_cat.get(ext, "Altro")
+                            rel_path = os.path.relpath(path, base_path)
+                            
+                            files_to_copy.append({
+                                'source': path,
+                                'size': size,
+                                'category': cat,
+                                'rel_path': rel_path,
+                                'root_label': "Android",
+                                'device_id': device_id
+                            })
+                            total_size += size
+                            if progress_callback: progress_callback("scanning", os.path.basename(path))
+                    except ValueError:
+                        continue
+                        
+            except Exception:
+                # Fallback to simple find for this folder
+                try:
+                    find_cmd = f"find '{folder}' \\( -path '*/.thumbnails' -o -path '*/.cache' -o -path '*/Android/data' \\) -prune -o -type f -print"
+                    result = subprocess.run(
+                        [self.adb_exe, "-s", device_id, "shell", find_cmd],
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                        encoding='utf-8',
+                        errors='ignore',
+                        check=False
+                    )
+                    for line in result.stdout.splitlines():
+                        path = line.strip()
+                        if not path: continue
+                        
+                        ext = os.path.splitext(path)[1].lower()
+                        if ext in allowed_exts:
+                            if self._is_excluded_android(path, exclusions): continue
+                            cat = ext_to_cat.get(ext, "Altro")
+                            rel_path = os.path.relpath(path, base_path)
+                            
+                            files_to_copy.append({
+                                'source': path,
+                                'size': 0,
+                                'category': cat,
+                                'rel_path': rel_path,
+                                'root_label': "Android",
+                                'device_id': device_id
+                            })
+                            if progress_callback: progress_callback("scanning", os.path.basename(path))
+                except Exception:
+                    pass
+
         return files_to_copy, total_size
 
     def _is_excluded_android(self, path, exclusions):
@@ -575,7 +633,9 @@ class AndroidBackupEngine(BackupEngine):
             rel = file_info['rel_path']
             cat = file_info['category']
             
-            dst = dest_path / cat / rel
+            # On Android, user requested to keep original structure instead of categories
+            # rel is already relative to /sdcard (e.g. DCIM/Camera/img.jpg)
+            dst = dest_path / rel
             
             try:
                 dst.parent.mkdir(parents=True, exist_ok=True)

@@ -84,13 +84,14 @@ class GumBackupApp:
 
     def step_select_mode(self):
         self.print_header("Seleziona Modalità")
-        res = self._run_gum(["choose", "--header", "Che tipo di backup vuoi effettuare?", "Backup da PC/Mac", "Backup da Android"])
+        res = self._run_gum(["choose", "--header", "Che tipo di backup vuoi effettuare?", "Backup di PC/Mac", "Backup di Android"])
         
         if res.returncode != 0:
             sys.exit()
             
         if "Android" in res.stdout:
             self.mode = "Android"
+            self.whitelist_paths = [] # Clear default whitelist for Android
             self.android_engine = AndroidBackupEngine()
             
             # Check ADB
@@ -211,43 +212,46 @@ class GumBackupApp:
                 self.custom_extensions = [e.strip() for e in exts.split(",") if e.strip()]
 
         self.clear_screen()
-        print(Fore.CYAN + "Definizione Percorsi di Ricerca")
-        print(Fore.CYAN + "Default: Ricerca automatica su tutti i dischi fissi.")
-        print(Fore.CYAN + "Opzionale: Puoi specificare una lista di cartelle precise (Whitelist).")
         
-        if self.whitelist_paths:
-             print(Fore.YELLOW + "\nWhitelist attuale:")
-             for p in self.whitelist_paths:
-                 print(Fore.YELLOW + f"   - {p}")
-        else:
-             print(Fore.YELLOW + "\nWhitelist attuale: (Nessuna - Scansione Completa)")
-             
-        print("")
-        res = self._run_gum(["confirm", "--default=false", "Vuoi modificare la lista delle cartelle esclusive?"])
-        if res.returncode == 0:
-             print(Fore.CYAN + "\nInserisci i percorsi da scansionare (uno per riga).")
-             print(Fore.CYAN + "Premi CTRL+D (o CTRL+Z su Windows) poi INVIO per terminare.")
-             current_value = "\n".join(self.whitelist_paths) if self.whitelist_paths else ""
-             res_write = self._run_gum(["write", "--value", current_value, "--placeholder", "Esempio:\nC:\\Dati_Importanti\nD:\\Foto_Vacanze"])
-             
-             if res_write.returncode == 0:
-                 paths = res_write.stdout.strip().split('\n')
-                 self.whitelist_paths = []
-                 for p in paths:
-                     clean_p = p.strip()
-                     if clean_p:
-                         if os.path.exists(clean_p) and os.path.isdir(clean_p):
-                            self.whitelist_paths.append(clean_p)
-                         else:
-                            print(Fore.YELLOW + f"Attenzione: '{clean_p}' non esiste o non è una cartella.")
-                            time.sleep(1)
-                            
-             if self.whitelist_paths:
-                  print(Fore.GREEN + f"MODALITÀ WHITELIST ATTIVA: {len(self.whitelist_paths)} percorsi definiti.")
-                  time.sleep(1)
-             else:
-                  print(Fore.YELLOW + "Nessun percorso valido inserito. Si userà la ricerca standard (tutti i dischi).")
-                  time.sleep(2)
+        # Only show Whitelist configuration if NOT Android
+        if self.mode != "Android":
+            print(Fore.CYAN + "Definizione Percorsi di Ricerca")
+            print(Fore.CYAN + "Default: Ricerca automatica su tutti i dischi fissi.")
+            print(Fore.CYAN + "Opzionale: Puoi specificare una lista di cartelle precise (Whitelist).")
+            
+            if self.whitelist_paths:
+                 print(Fore.YELLOW + "\nWhitelist attuale:")
+                 for p in self.whitelist_paths:
+                     print(Fore.YELLOW + f"   - {p}")
+            else:
+                 print(Fore.YELLOW + "\nWhitelist attuale: (Nessuna - Scansione Completa)")
+                 
+            print("")
+            res = self._run_gum(["confirm", "--default=false", "Vuoi modificare la lista delle cartelle esclusive?"])
+            if res.returncode == 0:
+                 print(Fore.CYAN + "\nInserisci i percorsi da scansionare (uno per riga).")
+                 print(Fore.CYAN + "Premi CTRL+D (o CTRL+Z su Windows) poi INVIO per terminare.")
+                 current_value = "\n".join(self.whitelist_paths) if self.whitelist_paths else ""
+                 res_write = self._run_gum(["write", "--value", current_value, "--placeholder", "Esempio:\nC:\\Dati_Importanti\nD:\\Foto_Vacanze"])
+                 
+                 if res_write.returncode == 0:
+                     paths = res_write.stdout.strip().split('\n')
+                     self.whitelist_paths = []
+                     for p in paths:
+                         clean_p = p.strip()
+                         if clean_p:
+                             if os.path.exists(clean_p) and os.path.isdir(clean_p):
+                                self.whitelist_paths.append(clean_p)
+                             else:
+                                print(Fore.YELLOW + f"Attenzione: '{clean_p}' non esiste o non è una cartella.")
+                                time.sleep(1)
+                                
+                 if self.whitelist_paths:
+                      print(Fore.GREEN + f"MODALITÀ WHITELIST ATTIVA: {len(self.whitelist_paths)} percorsi definiti.")
+                      time.sleep(1)
+                 else:
+                      print(Fore.YELLOW + "Nessun percorso valido inserito. Si userà la ricerca standard (tutti i dischi).")
+                      time.sleep(2)
 
         self.clear_screen()
         if not self.exclusions:
@@ -288,6 +292,49 @@ class GumBackupApp:
             drives = self.engine.get_removable_drives()
             if not drives:
                 print(Fore.RED + "Nessuna unità USB trovata!")
+                
+                # Fallback: ask for local folder
+                res = self._run_gum(["confirm", "--default=false", "Nessuna USB trovata. Vuoi salvare i backup in una cartella specifica?"])
+                if res.returncode == 0:
+                    print(Fore.CYAN + "Inserisci il percorso completo della cartella di destinazione:")
+                    res_input = self._run_gum(["input", "--placeholder", "Es: C:\\Backup o /Users/nome/Backup"])
+                    custom_path = res_input.stdout.strip()
+                    
+                    if custom_path:
+                        abs_path = os.path.abspath(custom_path)
+                        
+                        # Check/Create folder
+                        if not os.path.exists(abs_path):
+                            res_create = self._run_gum(["confirm", f"La cartella '{abs_path}' non esiste. Vuoi crearla?"])
+                            if res_create.returncode == 0:
+                                try:
+                                    os.makedirs(abs_path)
+                                except Exception as e:
+                                    print(Fore.RED + f"Impossibile creare la cartella: {e}")
+                                    time.sleep(2)
+                                    continue
+                            else:
+                                continue
+                        
+                        if os.path.isdir(abs_path):
+                            try:
+                                usage = shutil.disk_usage(abs_path)
+                                self.selected_drive = {
+                                    'device': 'Local Folder',
+                                    'mountpoint': abs_path,
+                                    'free': usage.free,
+                                    'total': usage.total
+                                }
+                                return # Drive selected, exit function
+                            except Exception as e:
+                                print(Fore.RED + f"Errore accesso cartella: {e}")
+                                time.sleep(2)
+                                continue
+                        else:
+                            print(Fore.RED + "Il percorso indicato non è una cartella.")
+                            time.sleep(2)
+                            continue
+                
                 res = self._run_gum(["confirm", "Riprovare?"])
                 if res.returncode != 0: sys.exit()
                 continue
