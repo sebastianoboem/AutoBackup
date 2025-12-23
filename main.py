@@ -20,6 +20,7 @@ class GumBackupApp:
         self.selected_categories = []
         self.custom_extensions = []
         self.exclusions = []
+        self.exceptions = []
         self.selected_drive = None
         self.gum_exe = self._find_gum()
         self.test_mode = False
@@ -286,6 +287,44 @@ class GumBackupApp:
             print(Fore.GREEN + f"Lista esclusioni aggiornata: {len(self.exclusions)} regole attive.")
             time.sleep(1)
 
+        self.exceptions = []
+        # Pre-populate defaults if available (e.g. Android WhatsApp)
+        if hasattr(self.engine, 'default_exceptions'):
+             self.exceptions.extend(self.engine.default_exceptions)
+        elif self.mode == "Android" and hasattr(self.android_engine, 'default_exceptions'):
+             self.exceptions.extend(self.android_engine.default_exceptions)
+             
+        print(Fore.CYAN + "\nGestione Eccezioni (Inclusioni Forzate)")
+        print(Fore.CYAN + "Definisci quali sottocartelle includere ANCHE SE la cartella padre è esclusa.")
+        print(Fore.CYAN + "Esempio: Escludi 'Android' ma includi 'Android/media/com.whatsapp/Whatsapp'.")
+        
+        if self.exceptions:
+             print(Fore.YELLOW + "Eccezioni predefinite attive:")
+             for e in self.exceptions:
+                 print(Fore.YELLOW + f"   - {e}")
+        
+        res = self._run_gum(["confirm", "--default=false", "Vuoi modificare le eccezioni?"])
+        if res.returncode == 0:
+             print(Fore.CYAN + "\nInserisci i percorsi da includere forzatamente (uno per riga).")
+             print(Fore.CYAN + "Premi CTRL+D (o CTRL+Z su Windows) poi INVIO per terminare.")
+             
+             current_val = "\n".join(self.exceptions)
+             placeholder = "Esempio:\n/sdcard/Android/media/com.whatsapp/Whatsapp" if self.mode == "Android" else "Esempio:\nC:\\Users\\Utente\\Documents\\CartellaSpeciale"
+             
+             res_write = self._run_gum(["write", "--value", current_val, "--placeholder", placeholder, "--width", "80", "--height", "10"])
+             
+             if res_write.returncode == 0:
+                 paths = res_write.stdout.strip().split('\n')
+                 self.exceptions = []
+                 for p in paths:
+                     clean_p = p.strip()
+                     if clean_p:
+                         self.exceptions.append(clean_p)
+                         
+        if self.exceptions:
+            print(Fore.GREEN + f"Lista eccezioni aggiornata: {len(self.exceptions)} regole attive.")
+            time.sleep(1)
+
     def step2_select_drive(self):
         self.print_header("Destinazione")
         while True:
@@ -484,6 +523,11 @@ class GumBackupApp:
         else:
             print(Fore.RED + "   - [Auto] Cartelle nascoste (es. .thumbnails)")
             
+        if self.exceptions:
+            print(Fore.WHITE + Style.BRIGHT + "\nEccezioni (Inclusioni Forzate):")
+            for exc in self.exceptions:
+                print(Fore.GREEN + f"   - {exc}")
+
         print(Fore.WHITE + Style.BRIGHT + "\nFiltri Attivi:")
         for cat, exts in cat_map.items():
             print(f"   - {cat}: {', '.join(exts)}")
@@ -502,9 +546,9 @@ class GumBackupApp:
         print(Fore.YELLOW + "Avvio analisi file in corso...")
         
         if self.mode == "PC":
-            files, size = self.engine.scan_files(all_scan_roots, cat_map, self.custom_extensions, self.exclusions)
+            files, size = self.engine.scan_files(all_scan_roots, cat_map, self.custom_extensions, self.exclusions, self.exceptions)
         else:
-            files, size = self.android_engine.scan_files(self.android_device_id, cat_map, self.custom_extensions, self.exclusions)
+            files, size = self.android_engine.scan_files(self.android_device_id, cat_map, self.custom_extensions, self.exclusions, self.exceptions)
         
         if self.test_mode:
             print(Fore.YELLOW + "Applicazione filtro TEST MODE (max 10 file per categoria)...")

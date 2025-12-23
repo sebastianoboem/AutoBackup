@@ -38,4 +38,4 @@ fi
 echo "🔨 Avvio Build macOS..."
 python build_mac.py
 
-echo "✅ Build completata. Eseguibile in: dist/AutoBackupGum"
+echo "✅ Build completata. Eseguibile in: dist/AutoBackupMAC"

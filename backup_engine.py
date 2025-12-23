@@ -89,11 +89,14 @@ class BackupEngine:
                         pass
         return drives
 
-    def scan_files(self, source_drives, category_extensions_map, custom_extensions, exclusions, progress_callback=None):
+    def scan_files(self, source_drives, category_extensions_map, custom_extensions, exclusions, exceptions=None, progress_callback=None):
         """
         Scans drives for files matching criteria.
         category_extensions_map: dict { "CategoryName": [".ext1", ".ext2"] }
         """
+        if exceptions is None:
+            exceptions = []
+            
         files_to_copy = []
         total_size = 0
         
@@ -175,10 +178,10 @@ class BackupEngine:
                         return [], 0
                     
                     # 1. Prune subdirectories
-                    dirs[:] = [d for d in dirs if not self._is_excluded(Path(root) / d, exclusions)]
+                    dirs[:] = [d for d in dirs if not self._is_excluded(Path(root) / d, exclusions, exceptions)]
                     
                     # 2. Check if CURRENT root is excluded
-                    if self._is_excluded(Path(root), exclusions):
+                    if self._is_excluded(Path(root), exclusions, exceptions):
                         continue
 
                     for file in files:
@@ -208,9 +211,11 @@ class BackupEngine:
 
         return files_to_copy, total_size
 
-    def _is_excluded(self, path, exclusions):
+    def _is_excluded(self, path, exclusions, exceptions=None):
         """Check if path matches any exclusion criteria."""
         path = Path(path)
+        if exceptions is None:
+            exceptions = []
         
         # Check hidden attribute (Windows) or dotfile (Unix/Windows)
         # Note: On Windows, checking FILE_ATTRIBUTE_HIDDEN is more robust, but stat().st_file_attributes is platform dependent.
@@ -243,23 +248,53 @@ class BackupEngine:
         
         # Check custom exclusions (path starts with exclusion)
         path_str = str(path).lower()
+        is_excluded = False
+        
         for excl in exclusions:
             excl_str = str(excl).lower()
             # Check if exclusion is a direct parent or match
             # We use startswith on string representation for simple tree exclusion
             if path_str.startswith(excl_str):
-                return True
+                is_excluded = True
+                break
                 
             # Also check if a specific part matches the exclusion (for folder names like 'Windows' appearing anywhere)
-            # But be careful: "Windows" exclusion should match C:\Windows, not C:\MyWindowsApp
-            # The previous logic checked exact part matches for system folders.
-            # We can try to emulate that if the exclusion doesn't look like a full path (no separators)
             if os.sep not in excl_str and '/' not in excl_str:
                  for part in path.parts:
                      if part.lower() == excl_str:
-                         return True
-                         
-        return False
+                         is_excluded = True
+                         break
+            
+            if is_excluded:
+                break
+
+        if not is_excluded:
+            return False
+
+        # If excluded, check if it is saved by an exception (inclusion)
+        # 1. Is path a parent of an exception? (We must traverse it to find the exception)
+        # 2. Is path the exception itself or inside it?
+        
+        for exc in exceptions:
+            exc_path = Path(exc)
+            
+            # Case 1: Path is parent of Exception
+            # e.g. Path=/A, Exc=/A/B
+            try:
+                exc_path.relative_to(path)
+                return False # Don't exclude, we need to go deeper
+            except ValueError:
+                pass
+            
+            # Case 2: Path is inside Exception (or is Exception)
+            # e.g. Path=/A/B/C, Exc=/A/B
+            try:
+                path.relative_to(exc_path)
+                return False # It is explicitly included
+            except ValueError:
+                pass
+                
+        return True
 
     def _get_category(self, ext):
         for cat, exts in self.categories.items():
@@ -347,6 +382,9 @@ class AndroidBackupEngine(BackupEngine):
         self.system_folders = [
             "/Android/data", "/Android/obb", "/.thumbnails", "/.cache", "/LOST.DIR"
         ]
+        self.default_exceptions = [
+            "/Android/media/com.whatsapp/WhatsApp/Media"
+        ]
 
     def _find_adb(self):
         # Check if adb is in path
@@ -383,9 +421,12 @@ class AndroidBackupEngine(BackupEngine):
         except Exception:
             return []
 
-    def scan_files(self, device_id, category_extensions_map, custom_extensions, exclusions, progress_callback=None):
+    def scan_files(self, device_id, category_extensions_map, custom_extensions, exclusions, exceptions=None, progress_callback=None):
         if not self.adb_exe:
             return [], 0
+            
+        if exceptions is None:
+            exceptions = []
 
         files_to_copy = []
         total_size = 0
@@ -414,21 +455,37 @@ class AndroidBackupEngine(BackupEngine):
         
         # Basic exclusions to prune
         prune_paths = [f"{base_path}/Android/data", f"{base_path}/Android/obb", f"{base_path}/.thumbnails"]
+        
+        # Helper to check if an exclusion is overridden by an exception (is parent of exception)
+        def is_parent_of_exception(excl_path):
+             excl_path = excl_path.replace("\\", "/")
+             for exc in exceptions:
+                 exc = exc.replace("\\", "/")
+                 # If exc starts with excl_path, then excl_path is a parent of exception
+                 # e.g. excl=/A, exc=/A/B
+                 if exc.startswith(excl_path) and len(exc) > len(excl_path):
+                     return True
+             return False
+
         # Add user exclusions if they look like absolute paths or relative
         for excl in exclusions:
             # Clean up exclusion string
             excl = excl.replace("\\", "/")
+            
+            path_to_prune = ""
             if not excl.startswith("/"):
-                # Relative path: treat as *name* to exclude? Or path?
-                # Simpler: just skip it in python loop if complex, 
-                # but pruning in find is much faster.
                 pass
             else:
-                # Absolute path (relative to sdcard root if user typed /Music)
+                # Absolute path
                 if excl.startswith("/sdcard"):
-                    prune_paths.append(excl)
+                    path_to_prune = excl
                 elif excl.startswith("/"):
-                     prune_paths.append(f"{base_path}{excl}")
+                     path_to_prune = f"{base_path}{excl}"
+            
+            if path_to_prune:
+                # Only prune if it DOES NOT contain an exception
+                if not is_parent_of_exception(path_to_prune):
+                    prune_paths.append(path_to_prune)
 
         cmd_parts = [self.adb_exe, "-s", device_id, "shell", "find", base_path]
         
@@ -547,7 +604,7 @@ class AndroidBackupEngine(BackupEngine):
                         
                         ext = os.path.splitext(path)[1].lower()
                         if ext in allowed_exts:
-                            if self._is_excluded_android(path, exclusions): continue
+                            if self._is_excluded_android(path, exclusions, exceptions): continue
                             cat = ext_to_cat.get(ext, "Altro")
                             rel_path = os.path.relpath(path, base_path)
                             
@@ -583,7 +640,7 @@ class AndroidBackupEngine(BackupEngine):
                         
                         ext = os.path.splitext(path)[1].lower()
                         if ext in allowed_exts:
-                            if self._is_excluded_android(path, exclusions): continue
+                            if self._is_excluded_android(path, exclusions, exceptions): continue
                             cat = ext_to_cat.get(ext, "Altro")
                             rel_path = os.path.relpath(path, base_path)
                             
@@ -601,16 +658,34 @@ class AndroidBackupEngine(BackupEngine):
 
         return files_to_copy, total_size
 
-    def _is_excluded_android(self, path, exclusions):
+    def _is_excluded_android(self, path, exclusions, exceptions=None):
         # Path is a string here (remote path)
         # exclusions are list of strings
+        if exceptions is None:
+            exceptions = []
+            
+        p = path.replace("\\", "/").lower()
+        is_excluded = False
+        
         for excl in exclusions:
             # clean path separators
-            p = path.replace("\\", "/").lower()
             e = excl.replace("\\", "/").lower()
             if e in p: # Simple substring match for now
-                 return True
-        return False
+                 is_excluded = True
+                 break
+        
+        if not is_excluded:
+            return False
+            
+        # If excluded, check exceptions
+        for exc in exceptions:
+            exc = exc.replace("\\", "/").lower()
+            # 1. Is path parent of exception? (Shouldn't happen here as we are checking files, but maybe folders?)
+            # 2. Is path inside exception?
+            if p.startswith(exc):
+                return False
+                
+        return True
 
     def copy_files(self, files_list, destination_root, verify=True, progress_callback=None):
         copied_count = 0
