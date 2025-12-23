@@ -18,7 +18,7 @@ Un'applicazione portatile per il backup dei dati sviluppata in Python, progettat
 - Python 3.8+ (solo per eseguire da sorgente o compilare)
 - **ADB (Android Debug Bridge)**: Necessario solo per il backup da dispositivi Android.
  
-## Installazione e Utilizzo
+## Sviluppo
  
 ### 1. Eseguire da Sorgente
 
@@ -57,6 +57,8 @@ Per distribuire l'applicazione come file unico portatile:
   ```
 
 Troverai l'eseguibile nella cartella `dist`.
+
+# Utilizzo
 
 ## Backup da Android
 
