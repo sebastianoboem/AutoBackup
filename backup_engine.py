@@ -383,7 +383,7 @@ class AndroidBackupEngine(BackupEngine):
             "/Android/data", "/Android/obb", "/.thumbnails", "/.cache", "/LOST.DIR"
         ]
         self.default_exceptions = [
-            "/Android/media/com.whatsapp/WhatsApp/Media"
+            "/sdcard/Android/media/com.whatsapp/WhatsApp/Media"
         ]
 
     def _find_adb(self):
@@ -555,7 +555,7 @@ class AndroidBackupEngine(BackupEngine):
                 folder = line.strip()
                 if not folder: continue
                 # Skip known bad/system folders
-                if folder in ["Android", "lost+found", ".thumbnails", ".cache", "Backups", ".git"]:
+                if folder in ["lost+found", ".thumbnails", ".cache", "Backups", ".git"]:
                     continue
                 if folder.startswith("."):
                     continue
@@ -606,7 +606,9 @@ class AndroidBackupEngine(BackupEngine):
                         if ext in allowed_exts:
                             if self._is_excluded_android(path, exclusions, exceptions): continue
                             cat = ext_to_cat.get(ext, "Altro")
-                            rel_path = os.path.relpath(path, base_path)
+                            
+                            # Simplify path if it matches an exception
+                            rel_path = self._simplify_exception_path(path, base_path, exceptions)
                             
                             files_to_copy.append({
                                 'source': path,
@@ -642,7 +644,9 @@ class AndroidBackupEngine(BackupEngine):
                         if ext in allowed_exts:
                             if self._is_excluded_android(path, exclusions, exceptions): continue
                             cat = ext_to_cat.get(ext, "Altro")
-                            rel_path = os.path.relpath(path, base_path)
+                            
+                            # Simplify path if it matches an exception
+                            rel_path = self._simplify_exception_path(path, base_path, exceptions)
                             
                             files_to_copy.append({
                                 'source': path,
@@ -657,6 +661,58 @@ class AndroidBackupEngine(BackupEngine):
                     pass
 
         return files_to_copy, total_size
+
+    def _simplify_exception_path(self, path, base_path, exceptions):
+        """
+        If path is inside an exception, we want to flatten it.
+        E.g. Exception: /sdcard/Android/media/com.whatsapp/WhatsApp/Media
+             Path: /sdcard/Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Images/Img.jpg
+             Result: WhatsApp Images/Img.jpg
+             
+        If not inside exception, return standard relative path.
+        """
+        if not exceptions:
+            return os.path.relpath(path, base_path)
+            
+        p = path.replace("\\", "/").lower()
+        
+        best_exc = None
+        best_len = 0
+        
+        for exc in exceptions:
+            e = exc.replace("\\", "/").lower()
+            if p.startswith(e):
+                if len(e) > best_len:
+                    best_len = len(e)
+                    best_exc = exc
+        
+        if best_exc:
+            # Found an exception container
+            # We want the relative path from the exception root
+            # BUT: If the exception points to .../WhatsApp/Media, 
+            # and file is .../WhatsApp/Media/Images/img.jpg
+            # we want Images/img.jpg.
+            
+            # relpath needs correct case if possible, but we only have 'path' string.
+            # path is the full remote path.
+            # best_exc is the user provided exception string.
+            
+            # Let's try to do string manipulation carefully
+            # Remove the exception prefix from path
+            # path: /sdcard/.../Media/Folder/File
+            # exc:  /sdcard/.../Media
+            
+            # Case insensitive match for prefix length
+            prefix_len = len(best_exc)
+            
+            # Check if separator is needed
+            rel = path[prefix_len:]
+            if rel.startswith("/"):
+                rel = rel[1:]
+                
+            return rel
+            
+        return os.path.relpath(path, base_path)
 
     def _is_excluded_android(self, path, exclusions, exceptions=None):
         # Path is a string here (remote path)
