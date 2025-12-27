@@ -129,16 +129,6 @@ class GumBackupApp:
         else:
             self.mode = "PC"
 
-    def step0_test_mode(self):
-        self.print_header("Modalità Test")
-        res = self._run_gum(["confirm", "Abilitare la modalità TEST (limitata a 10 file per tipo)?"])
-        if res.returncode == 0:
-            self.test_mode = True
-            print(Fore.YELLOW + "MODALITÀ TEST ATTIVATA: Verranno copiati max 10 file per categoria.")
-            time.sleep(1)
-        else:
-            self.test_mode = False
-
     def step1_select_filters(self):
         self.print_header("Filtri File")
         
@@ -627,7 +617,6 @@ class GumBackupApp:
     def run(self):
         try:
             self.step_select_mode()
-            self.step0_test_mode()
             self.step1_select_filters()
             self.step2_select_drive()
             files, size = self.step3_scan_and_confirm()
